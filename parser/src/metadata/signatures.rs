@@ -8,7 +8,7 @@ use super::{token_categories::TypeDefOrRef, BlobInt, MetaWrite, Rid, TableIdx, T
 
 #[binrw::binrw]
 #[derive(Debug)]
-#[bw(import(cx: &MetaWrite))]
+#[bw(import(cx: & MetaWrite))]
 pub enum TypeSpecialised {
     #[brw(magic = 0xf_u8)]
     Ptr {
@@ -48,7 +48,7 @@ pub enum TypeSpecialised {
 }
 
 #[derive(Debug, BinRead, BinWrite)]
-#[bw(import(cx: &MetaWrite))]
+#[bw(import(cx: & MetaWrite))]
 pub enum DefinedType {
     #[brw(magic = 0x11_u8)]
     ValueType(
@@ -65,7 +65,7 @@ pub enum DefinedType {
 }
 
 #[derive(Debug, BinRead, BinWrite)]
-#[bw(import(cx: &MetaWrite))]
+#[bw(import(cx: & MetaWrite))]
 pub enum Type {
     #[brw(magic = 0x2_u8)]
     Boolean,
@@ -110,7 +110,7 @@ pub enum Type {
 }
 
 #[derive(Debug, BinRead, BinWrite)]
-#[bw(import(cx: &MetaWrite))]
+#[bw(import(cx: & MetaWrite))]
 pub enum PtrType {
     #[brw(magic = 0x1_u8)]
     Void,
@@ -139,7 +139,7 @@ where
 }
 
 #[derive(Debug, BinRead, BinWrite)]
-#[bw(import(cx: &MetaWrite))]
+#[bw(import(cx: & MetaWrite))]
 pub enum ParamType {
     #[brw(magic = 0x10_u8)]
     ByRef(#[bw(args(cx))] Type),
@@ -149,7 +149,7 @@ pub enum ParamType {
 }
 
 #[derive(Debug, BinRead, BinWrite)]
-#[bw(import(cx: &MetaWrite))]
+#[bw(import(cx: & MetaWrite))]
 pub struct Param {
     #[br(parse_with = read_while_trying)]
     #[bw(args(cx))]
@@ -159,7 +159,7 @@ pub struct Param {
 }
 
 #[derive(Debug, BinRead, BinWrite)]
-#[bw(import(cx: &MetaWrite))]
+#[bw(import(cx: & MetaWrite))]
 pub enum ReturnType {
     #[brw(magic = 0x1_u8)]
     Void,
@@ -171,7 +171,7 @@ pub enum ReturnType {
 }
 
 #[derive(Debug, BinRead, BinWrite)]
-#[bw(import(cx: &MetaWrite))]
+#[bw(import(cx: & MetaWrite))]
 pub struct Return {
     #[br(parse_with = read_while_trying)]
     #[bw(args(cx))]
@@ -181,7 +181,7 @@ pub struct Return {
 }
 
 #[derive(Debug, BinRead, BinWrite)]
-#[bw(import(cx: &MetaWrite))]
+#[bw(import(cx: & MetaWrite))]
 pub enum CustomModifier {
     #[brw(magic = 0x1f_u8)]
     #[doc(alias = "CModReqd")]
@@ -218,7 +218,7 @@ bitflags! {
 bitflags_brw!(TypeElementModifier: u8);
 
 #[derive(Debug, BinRead, BinWrite)]
-#[bw(import(cx: &MetaWrite))]
+#[bw(import(cx: & MetaWrite))]
 pub enum TypeElement {
     #[br(assert(flags.contains(TypeElementModifier::IS_MODIFIER)))]
     Modifier {
@@ -270,7 +270,7 @@ pub struct MethodSig {
 }
 
 #[derive(Debug, BinRead, BinWrite)]
-#[bw(import(cx: &MetaWrite))]
+#[bw(import(cx: & MetaWrite))]
 enum VariadicParam {
     #[brw(magic = 0x41_u8)]
     Sentinel,
@@ -439,7 +439,7 @@ pub fn parse_type_def_or_ref<R: Read + Seek>(
 
     Ok(Token {
         table,
-        idx: TableIdx::from_rid(rid),
+        idx: TableIdx::new_thin(rid),
     })
 }
 
@@ -449,7 +449,7 @@ pub fn write_type_def_or_ref<W: Write + Seek>(
     endian: Endian,
     cx: &MetaWrite,
 ) -> BinResult<()> {
-    let rid = cx.token_rid(token)?;
+    let rid = cx.order().token_rid(token)?;
     let encoded = (rid.to_u32() << 2) & (token.table as u32);
     BlobInt(encoded).write_options(writer, endian, ())
 }
@@ -471,7 +471,7 @@ pub struct ArrayShape {
 }
 
 #[derive(Debug, BinRead, BinWrite)]
-#[bw(import(cx: &MetaWrite))]
+#[bw(import(cx: & MetaWrite))]
 pub struct ModifiedType {
     #[br(parse_with = read_while_trying)]
     #[bw(args(cx))]
@@ -481,7 +481,7 @@ pub struct ModifiedType {
 }
 
 #[derive(Debug, BinRead, BinWrite)]
-#[bw(import(cx: &MetaWrite))]
+#[bw(import(cx: & MetaWrite))]
 #[brw(magic = 0x6_u8)]
 pub struct FieldSig {
     #[bw(args(cx))]
@@ -496,7 +496,7 @@ pub enum Constraint {
 
 // todo: this is abysmal.
 #[derive(Debug, BinRead, BinWrite)]
-#[bw(import(cx: &MetaWrite))]
+#[bw(import(cx: & MetaWrite))]
 pub enum LocalVarModifier {
     Both {
         #[bw(args(cx))]
@@ -508,7 +508,7 @@ pub enum LocalVarModifier {
 }
 
 #[derive(Debug, BinRead, BinWrite)]
-#[bw(import(cx: &MetaWrite))]
+#[bw(import(cx: & MetaWrite))]
 pub enum LocalVar {
     #[brw(magic = 0x10_u8)]
     #[br(assert({
@@ -532,7 +532,7 @@ pub enum LocalVar {
 
 #[binrw::binrw]
 #[derive(Debug)]
-#[bw(import(cx: &MetaWrite))]
+#[bw(import(cx: & MetaWrite))]
 #[brw(magic = 0x7_u8)]
 pub struct LocalVarSig {
     #[br(temp)]
@@ -544,7 +544,7 @@ pub struct LocalVarSig {
 }
 
 #[derive(Debug, BinRead, BinWrite)]
-#[bw(import(cx: &MetaWrite))]
+#[bw(import(cx: & MetaWrite))]
 pub enum StandAloneSignature {
     LocalVars(#[bw(args(cx))] LocalVarSig),
     Method(#[bw(args(cx))] MethodSig),
@@ -560,7 +560,7 @@ pub enum ThisProperty {
 
 #[binrw::binrw]
 #[derive(Debug)]
-#[bw(import(cx: &MetaWrite))]
+#[bw(import(cx: & MetaWrite))]
 pub struct PropertySig {
     #[br(map = |this| matches!(this, ThisProperty::HasThis))]
     #[bw(map = |&has_this| if has_this { ThisProperty::HasThis } else { ThisProperty::None })]
@@ -577,7 +577,7 @@ pub struct PropertySig {
 
 #[binrw::binrw]
 #[derive(Debug)]
-#[bw(import(cx: &MetaWrite))]
+#[bw(import(cx: & MetaWrite))]
 #[brw(magic = 0x0a_u8)]
 pub struct MethodSpec {
     #[br(temp)]

@@ -153,6 +153,7 @@ impl From<ZString> for String {
     }
 }
 
+#[macro_export]
 macro_rules! bitflags_brw {
     ($ty:ty : $inner:ty) => {
         impl binrw::BinRead for $ty {

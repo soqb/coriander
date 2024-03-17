@@ -1,0 +1,12 @@
+[package]
+name = "coriander-cil"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+binrw = "0.13.3"
+bitflags = "2.4.2"
+coriander-parser = { version = "0.1.0", path = "../parser" }
+indexmap = "2.2.5"

@@ -8,7 +8,7 @@ use std::{
 use binrw::{BinRead, BinResult, BinWrite, Endian};
 use bitflags::bitflags;
 
-use super::{HeapSizes, MetaRead, MetaWrite, TableIdx, TokenTableFlags};
+use super::{HeapSizes, MetaRead, MetaWrite, TableIdx, TablesOrder, TokenTableFlags};
 use crate::utils::{BinReadOptional, BinWriteOptional};
 
 #[derive(BinRead, BinWrite, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -53,6 +53,10 @@ pub enum TableId {
     GenericParam = 0x2A,
     MethodSpec = 0x2B,
     GenericParamConstraint = 0x2C,
+}
+
+impl TableId {
+    pub const MAX_PLUS_ONE: u8 = 0x2D;
 }
 
 bitflags! {
@@ -222,7 +226,7 @@ mod stream_idxs {
             }
 
             impl BinWriteOptional for $name {
-                type Args<'a> = &'a MetaWrite;
+                type Args<'a> = &'a  MetaWrite;
 
                 fn write_some<W: Write + Seek>(
                     &self,
@@ -270,36 +274,18 @@ mod stream_idxs {
         #[derive(Debug, Clone, Copy, PartialEq)]
         pub GuidIdx(HeapSizes::GUID_STREAM_IS_BIG);
     }
+
+    #[derive(Debug, Clone, Copy, PartialEq, BinRead, BinWrite)]
+    pub struct UserStringIdx(pub u32);
 }
 
 pub use stream_idxs::*;
 
 pub trait TokenType {
     type TableIdRepr: Copy;
-    type ReadArgs<'a>;
-    type WriteArgs<'a>;
 
     fn from_table_repr(repr: Self::TableIdRepr) -> TableId;
     fn into_table_repr(table: TableId) -> Option<Self::TableIdRepr>;
-
-    fn read_token_optional<R: Read + Seek>(
-        reader: &mut R,
-        endian: Endian,
-        args: Self::ReadArgs<'_>,
-    ) -> BinResult<Option<Token<Self>>>;
-
-    fn write_token<W: Write + Seek>(
-        token: &Token<Self>,
-        writer: &mut W,
-        endian: Endian,
-        args: Self::WriteArgs<'_>,
-    ) -> BinResult<()>;
-
-    fn write_null_token<W: Write + Seek>(
-        writer: &mut W,
-        endian: Endian,
-        args: Self::WriteArgs<'_>,
-    ) -> BinResult<()>;
 }
 
 macro_rules! def_token_categories {
@@ -315,8 +301,6 @@ macro_rules! def_token_categories {
             }
 
             impl TokenType for $name {
-                type ReadArgs<'a> = &'a MetaRead;
-                type WriteArgs<'a> = &'a MetaWrite;
                 type TableIdRepr = Self;
 
                 fn from_table_repr(repr: Self) -> TableId {
@@ -335,14 +319,18 @@ macro_rules! def_token_categories {
                         _ => None,
                     }
                 }
+            }
 
-                fn read_token_optional<R: Read + Seek>(
+            impl BinReadOptional for Token<$name> {
+                type Args<'a> = &'a MetaRead;
+
+                fn read_optional<R: Read + Seek>(
                     reader: &mut R,
                     endian: Endian,
-                    cx: Self::ReadArgs<'_>,
-                ) -> BinResult<Option<Token<Self>>> {
+                    cx: Self::Args<'_>,
+                ) -> BinResult<Option<Self>> {
                     if cx.sizes().cat_is_big($cat_flag) {
-                        Ok(Token::<()>::read_optional(reader, endian, cx)?.and_then(Token::retype))
+                        Ok(Token::<()>::read_optional(reader, endian, ())?.and_then(Token::retype))
                     } else {
                         let bits = u16::read_options(reader, endian, ())?;
                         let rid = bits >> $tag_bits;
@@ -354,45 +342,44 @@ macro_rules! def_token_categories {
                             _ => return Err(binrw::Error::NoVariantMatch { pos: reader.stream_position()? - 2 }),
                         };
 
-                        Ok(Rid::new(rid as u32).map(TableIdx::from_rid).map(|idx| Token { table, idx }))
+                        Ok(Rid::new(rid as u32).map(TableIdx::new_thin).map(|idx| Token { table, idx }))
                     }
                 }
+            }
 
-                fn write_token<W: Write + Seek>(
-                    &token: &Token<Self>,
+            impl BinWriteOptional for Token<$name> {
+                type Args<'a> = &'a MetaWrite;
+                fn write_some<W: Write + Seek>(
+                    &self,
                     writer: &mut W,
                     endian: Endian,
-                    cx: Self::WriteArgs<'_>,
+                    cx: Self::Args<'_>,
                 ) -> BinResult<()> {
                     if cx.sizes().cat_is_big($cat_flag) {
-                        token.to_abstract().write_options(writer, endian, cx)
+                        self.to_abstract().write_options(writer, endian, cx.order())
                     } else {
-                        let tag = match token.table {
+                        let tag = match self.table {
                             $(
                                 $name::$table => $pat,
                             )*
                         };
-                        let rid = cx.token_rid(token)?.to_u32() as u16;
+                        let rid = cx.order().token_rid(*self)?.to_u32() as u16;
                         let bits = (rid << $tag_bits) | tag;
 
                         bits.write_options(writer, endian, ())
                     }
                 }
 
-                fn write_null_token<W: Write + Seek>(
+                fn write_none<W: Write + Seek>(
                     writer: &mut W,
                     endian: Endian,
-                    cx: Self::WriteArgs<'_>,
+                    cx: Self::Args<'_>,
                 ) -> BinResult<()> {
                     Rid::write_none(writer, endian, (cx.sizes().cat_is_big($cat_flag),))
                 }
             }
 
-            // impl $name {
-
-            //     pub fn should_be_big(mapping: impl Fn(TableId) -> u32) -> bool {
-            //     }
-            // }
+            impl_brw_optional!(for Token<$name>);
         )*
 
         pub(crate) fn big_category_flags(mapping: impl Fn(TableId) -> u32) -> TokenCategoryFlags {
@@ -515,8 +502,6 @@ pub mod token_categories {
 
 impl TokenType for () {
     type TableIdRepr = TableId;
-    type ReadArgs<'a> = &'a MetaRead;
-    type WriteArgs<'a> = &'a MetaWrite;
 
     fn from_table_repr(repr: Self::TableIdRepr) -> TableId {
         repr
@@ -525,12 +510,16 @@ impl TokenType for () {
     fn into_table_repr(table: TableId) -> Option<Self::TableIdRepr> {
         Some(table)
     }
+}
 
-    fn read_token_optional<R: Read + Seek>(
+impl BinReadOptional for Token<()> {
+    type Args<'a> = ();
+
+    fn read_optional<R: Read + Seek>(
         reader: &mut R,
         endian: Endian,
-        _: Self::ReadArgs<'_>,
-    ) -> BinResult<Option<Token<Self>>> {
+        _: Self::Args<'_>,
+    ) -> BinResult<Option<Self>> {
         // todo: It's ambiguous in the spec as to what exactly a "null" token is.
         // Specifically, whether the bit patterns of the form `0xNN000000` are all valid nulls.
         // We assume they are, but don't preserve their exact form.
@@ -545,20 +534,24 @@ impl TokenType for () {
         };
 
         Ok(Rid::new(id)
-            .map(TableIdx::from_rid)
+            .map(TableIdx::new_thin)
             .map(|rid| Token { table, idx: rid }))
     }
+}
 
-    fn write_token<W: Write + Seek>(
-        &token: &Token<Self>,
+impl BinWriteOptional for Token<()> {
+    type Args<'a> = &'a TablesOrder;
+
+    fn write_some<W: Write + Seek>(
+        &self,
         writer: &mut W,
         endian: Endian,
-        cx: Self::WriteArgs<'_>,
+        cx: Self::Args<'_>,
     ) -> BinResult<()> {
-        let id = cx.token_rid(token)?.to_u32();
+        let id = cx.token_rid(*self)?.to_u32();
         assert!(id < 2u32.pow(24));
 
-        token.table.write_options(writer, endian, ())?;
+        self.table.write_options(writer, endian, ())?;
 
         if endian == Endian::Little {
             writer.write_all(&id.to_le_bytes()[0..3])?;
@@ -569,15 +562,13 @@ impl TokenType for () {
         Ok(())
     }
 
-    fn write_null_token<W: Write + Seek>(
-        writer: &mut W,
-        _: Endian,
-        _: Self::WriteArgs<'_>,
-    ) -> BinResult<()> {
+    fn write_none<W: Write + Seek>(writer: &mut W, _: Endian, _: Self::Args<'_>) -> BinResult<()> {
         writer.write_all(&[0; 4])?;
         Ok(())
     }
 }
+
+impl_brw_optional!(for Token<()>);
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Token<T: TokenType + ?Sized = ()> {
@@ -625,38 +616,6 @@ impl<T: TokenType + ?Sized> Token<T> {
         })
     }
 }
-
-impl<T: TokenType + ?Sized> BinReadOptional for Token<T> {
-    type Args<'a> = T::ReadArgs<'a>;
-    fn read_optional<R: Read + Seek>(
-        reader: &mut R,
-        endian: Endian,
-        args: Self::Args<'_>,
-    ) -> BinResult<Option<Self>> {
-        T::read_token_optional(reader, endian, args)
-    }
-}
-impl<T: TokenType + ?Sized> BinWriteOptional for Token<T> {
-    type Args<'a> = T::WriteArgs<'a>;
-    fn write_some<W: Write + Seek>(
-        &self,
-        writer: &mut W,
-        endian: Endian,
-        args: Self::Args<'_>,
-    ) -> BinResult<()> {
-        T::write_token(self, writer, endian, args)
-    }
-
-    fn write_none<W: Write + Seek>(
-        writer: &mut W,
-        endian: Endian,
-        args: Self::Args<'_>,
-    ) -> BinResult<()> {
-        T::write_null_token(writer, endian, args)
-    }
-}
-
-impl_brw_optional!({ T: TokenType } for Token<T>);
 
 impl<T: TokenType + ?Sized> fmt::Debug for Token<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

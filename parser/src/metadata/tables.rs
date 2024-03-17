@@ -39,10 +39,9 @@ macro_rules! def_table_entries {
                 $(#[$field_attr])*
                 $field_vis $field: $field_ty,
             )* }
+
             impl TokenType for $name {
                 type TableIdRepr = ();
-                type ReadArgs<'a> = &'a MetaRead;
-                type WriteArgs<'a> = &'a MetaWrite;
 
                 fn from_table_repr(_: ()) -> TableId {
                     TableId::$name
@@ -55,35 +54,45 @@ macro_rules! def_table_entries {
                         None
                     }
                 }
+            }
 
-                fn read_token_optional<R: Read + Seek>(
+            impl BinReadOptional for Token<$name> {
+                type Args<'a> = &'a MetaRead;
+
+                fn read_optional<R: Read + Seek>(
                     reader: &mut R,
                     endian: Endian,
-                    meta_cx: Self::ReadArgs<'_>,
-                ) -> BinResult<Option<Token<Self>>> {
+                    meta_cx: Self::Args<'_>,
+                ) -> BinResult<Option<Self>> {
                     let Some(rid) = Rid::read_optional(reader, endian, (meta_cx.sizes().table_is_big($table_flag),))? else {
                         return Ok(None);
                     };
-                    Ok(Some(Token::new(TableIdx::from_rid(rid))))
+                    Ok(Some(Token::new(TableIdx::new_thin(rid))))
                 }
+            }
 
-                fn write_token<W: Write + Seek>(
-                    &token: &Token<Self>,
+            impl BinWriteOptional for Token<$name> {
+                type Args<'a> = &'a MetaWrite;
+
+                fn write_some<W: Write + Seek>(
+                    &self,
                     writer: &mut W,
                     endian: Endian,
-                    meta_cx: Self::WriteArgs<'_>,
+                    meta_cx: Self::Args<'_>,
                 ) -> BinResult<()> {
-                    meta_cx.token_rid(token)?.write_options(writer, endian, (meta_cx.sizes().table_is_big($table_flag),))
+                    meta_cx.order().token_rid(*self)?.write_options(writer, endian, (meta_cx.sizes().table_is_big($table_flag),))
                 }
 
-                fn write_null_token<W: Write + Seek>(
+                fn write_none<W: Write + Seek>(
                     writer: &mut W,
                     endian: Endian,
-                    meta_cx: Self::WriteArgs<'_>,
+                    meta_cx: Self::Args<'_>,
                 ) -> BinResult<()> {
                     Rid::write_none(writer, endian, (meta_cx.sizes().table_is_big($table_flag),))
                 }
             }
+
+            impl_brw_optional!(for Token<$name>);
         )*
     };
 }
@@ -369,7 +378,7 @@ bitflags_brw!(PropertyAttributes: u16);
 
 def_table_entries! {
     read_args(_cx: &MetaRead);
-    write_args(_cx: &MetaWrite);
+    write_args(_cx: & MetaWrite);
 
     pub Assembly(TokenTableFlags::ASSEMBLY) {
         pub hash_algorithm_id: u32,
@@ -583,7 +592,7 @@ def_table_entries! {
 
     pub MethodDef(TokenTableFlags::METHOD_DEF) {
         pub rva: Rva,
-        pub impl_falgs: MethodImplAttributes,
+        pub impl_flags: MethodImplAttributes,
         pub flags: MethodAttributes,
         #[br(parse_with = parse_args!(MetaString::read_unwrap; _cx))]
         #[bw(write_with = write_args!(MetaString::write_wrap; _cx))]

@@ -396,11 +396,11 @@ impl MetaRead {
 #[derive(Debug)]
 pub struct MetaWrite {
     sizes: SizeFlags,
-    order: HashMap<TableId, TableOrder>,
+    order: TablesOrder,
 }
 
 impl MetaWrite {
-    pub fn new(sizes: SizeFlags, order: HashMap<TableId, TableOrder>) -> Self {
+    pub fn new(sizes: SizeFlags, order: TablesOrder) -> Self {
         Self { sizes, order }
     }
 
@@ -408,16 +408,8 @@ impl MetaWrite {
         &self.sizes
     }
 
-    pub fn token_rid<T: TokenType + ?Sized>(
-        &self,
-        token: Token<T>,
-    ) -> Result<Rid, StaleTokenError> {
-        self.order[&token.table_id()]
-            .get_rid(token.idx)
-            .ok_or_else(|| StaleTokenError {
-                table: token.table_id(),
-                idx: token.idx,
-            })
+    pub fn order(&self) -> &TablesOrder {
+        &self.order
     }
 }
 
@@ -658,17 +650,17 @@ macro_rules! def_tables {
 
                 self.module.write_options(writer, endian, (&cx,))?;
 
-                $(
-                    for row in &self.$field.rows {
+                $({
+                    for row in cx.order().iter_rows(&self.$field, TableId::$table) {
                         row.write_options(writer, endian, (&cx,))?;
                     }
-                )*
+                })*
 
                 Ok(())
             }
         }
         impl $name {
-            pub fn order(_tables: &$name) -> HashMap<TableId, TableOrder> {
+            pub fn order(_tables: &$name) -> TablesOrder {
                 todo!()
             }
         }
@@ -728,7 +720,7 @@ impl TableIdx {
     /// # Usage
     /// For logical consistency, the relevant table must not have had
     /// any rows removed. Otherwise, the [`Rid`]s will be out of sync with the table.
-    pub fn from_rid(rid: Rid) -> Self {
+    pub fn new_thin(rid: Rid) -> Self {
         Self(rid.to_u32() as usize - 1)
     }
 }
@@ -767,7 +759,7 @@ impl<T> Table<T> {
     }
 
     pub fn contains(&self, idx: TableIdx) -> bool {
-        self.rows.get(idx.0).is_some()
+        self.get(idx).is_some()
     }
 
     pub fn get(&self, idx: TableIdx) -> Option<&T> {
@@ -790,41 +782,95 @@ impl<T> Table<T> {
 }
 
 #[derive(Debug)]
-pub struct TableOrder {
-    rids: HashMap<TableIdx, Rid>,
+pub struct TableEntryOrder {
+    idx_to_rid: HashMap<TableIdx, Rid>,
+    rid_to_idx: Vec<TableIdx>,
 }
 
-impl TableOrder {
+impl TableEntryOrder {
     pub fn unsorted<T>(table: &Table<T>) -> Self {
-        let rids = table
+        let idx_to_rid = table
             .rows
             .iter()
             .enumerate()
-            .flat_map(|(i, x)| {
-                x.is_some()
-                    .then(|| (TableIdx(i), Rid::new((i + 1) as u32).unwrap()))
+            .scan(0, |used_idx: &mut u32, (i, row)| {
+                if row.is_some() {
+                    *used_idx += 1;
+                    let entry = (TableIdx(i), Rid::new(*used_idx + 1).unwrap());
+                    Some(Some(entry))
+                } else {
+                    Some(None)
+                }
             })
+            .flatten()
             .collect();
-        Self { rids }
+        Self {
+            idx_to_rid,
+            rid_to_idx: (0..table.rows.len())
+                .map(TableIdx)
+                .filter(|&idx| table.contains(idx))
+                .collect(),
+        }
     }
 
-    pub fn sorting_by<T>(table: &Table<T>, mut f: impl FnMut(&T, &T) -> Ordering) -> Self {
-        let mut rid_list: Vec<TableIdx> = (0..)
+    pub fn sorted_by<T>(table: &Table<T>, mut f: impl FnMut(&T, &T) -> Ordering) -> Self {
+        let mut rid_to_idx: Vec<TableIdx> = (0..)
             .take(table.len())
             .map(|idx| TableIdx(idx))
             .filter(|&idx| table.contains(idx))
             .collect();
-        rid_list.sort_unstable_by(|&a, &b| f(table.get(a).unwrap(), table.get(b).unwrap()));
-        let rids = rid_list
-            .into_iter()
+        rid_to_idx.sort_unstable_by(|&a, &b| f(table.get(a).unwrap(), table.get(b).unwrap()));
+        let rids = rid_to_idx
+            .iter()
             .enumerate()
-            .map(|(rid_i, idx)| (idx, Rid::new((rid_i + 1) as u32).unwrap()))
+            .map(|(rid_i, &idx)| (idx, Rid::new((rid_i + 1) as u32).unwrap()))
             .collect();
-        Self { rids }
+        Self {
+            idx_to_rid: rids,
+            rid_to_idx,
+        }
     }
 
     pub fn get_rid(&self, idx: TableIdx) -> Option<Rid> {
-        self.rids.get(&idx).copied()
+        self.idx_to_rid.get(&idx).copied()
+    }
+
+    pub fn iter_rows<'a, T>(&'a self, table: &'a Table<T>) -> impl Iterator<Item = &'a T> + 'a {
+        self.rid_to_idx
+            .iter()
+            .map(|&idx| table.get(idx).expect("table should contain row {idx:?}"))
+    }
+}
+
+#[derive(Debug)]
+pub struct TablesOrder {
+    // hmm. there are some ids that are skipped, but i think this approach is sufficient.
+    storage: [TableEntryOrder; TableId::MAX_PLUS_ONE as usize],
+}
+
+impl TablesOrder {
+    fn table_order(&self, id: TableId) -> &TableEntryOrder {
+        &self.storage[id as u8 as usize]
+    }
+
+    pub fn token_rid<T: TokenType + ?Sized>(
+        &self,
+        token: Token<T>,
+    ) -> Result<Rid, StaleTokenError> {
+        self.table_order(token.table_id())
+            .get_rid(token.idx)
+            .ok_or_else(|| StaleTokenError {
+                table: token.table_id(),
+                idx: token.idx,
+            })
+    }
+
+    pub fn iter_rows<'a, T>(
+        &'a self,
+        table: &'a Table<T>,
+        table_id: TableId,
+    ) -> impl Iterator<Item = &'a T> + 'a {
+        self.table_order(table_id).iter_rows(table)
     }
 }
 
