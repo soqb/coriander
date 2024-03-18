@@ -3,7 +3,7 @@ use binrw::{BinRead, BinWrite};
 use bitflags::bitflags;
 
 #[macro_use]
-mod utils;
+pub mod utils;
 
 #[macro_use]
 pub mod pe;
@@ -64,34 +64,50 @@ pub struct CliHeader {
     pub v_table_fixups: Rva,
 }
 
-#[derive(BinRead, BinWrite, Debug)]
+#[derive(Debug)]
 pub struct ClrExe {
-    pe: Pe,
-    cli_header: CliHeader,
-    metadata: MetadataRoot,
+    pub pe: Pe,
+    pub cli_header: CliHeader,
+    pub metadata: MetadataRoot,
+    pub metadata_section_idx: usize,
 }
 
 impl ClrExe {
     pub fn new(pe: Pe) -> anyhow::Result<Self> {
-        let Some(cli_header) = pe
-            .data_dirs
-            .cli_header
-            .parse_le::<CliHeader>(&pe.sections)?
+        let cli_header_section = pe.data_dirs.cli_header.ptr.find_containing(&pe.sections);
+        let Some(cli_header) = cli_header_section
+            .map(|section| {
+                pe.data_dirs.cli_header.parse_options::<CliHeader>(
+                    section,
+                    binrw::Endian::Little,
+                    (),
+                )
+            })
+            .transpose()?
+            .flatten()
         else {
             return Err(anyhow!("PE is not CLR-capable"));
         };
 
         println!("{:#?}", cli_header);
-
-        println!(
-            "metadata start = {:x?}",
-            pe.sections.iter().find_map(|section| cli_header
-                .metadata
-                .ptr
-                .resolve_in_section(section)
-                .and_then(|data| section.body_offset.map(|body| body + data)))
-        );
-        let Some(metadata) = cli_header.metadata.parse_le(&pe.sections)? else {
+        let metadata_section_idx = pe
+            .sections
+            .iter()
+            .take_while(|section| !cli_header.metadata.ptr.is_contained_in(section))
+            .count();
+        {
+            let a = pe.sections[metadata_section_idx].body_offset.unwrap();
+            let b = cli_header.metadata.ptr.0;
+            let c = 0x2000;
+            println!(
+                "metadata offset: {a:#x} + {b:#x} - {c:#x} = {:#x}",
+                a + b - c,
+            );
+        }
+        let Some(metadata) = cli_header
+            .metadata
+            .parse_le::<MetadataRoot>(&pe.sections[metadata_section_idx])?
+        else {
             return Err(anyhow!("metadata section not present"));
         };
 
@@ -99,6 +115,7 @@ impl ClrExe {
             pe,
             cli_header,
             metadata,
+            metadata_section_idx,
         })
     }
 }

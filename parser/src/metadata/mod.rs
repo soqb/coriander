@@ -8,6 +8,7 @@ use std::{
     collections::HashMap,
     io::{Read, Seek, SeekFrom},
     iter,
+    num::NonZeroU32,
 };
 
 use binrw::{BinRead, BinResult, BinWrite, Endian};
@@ -53,7 +54,11 @@ fn with_seek<S: Seek, T>(
 ) -> BinResult<T> {
     let old_pos = stream.stream_position()?;
     stream.seek(seek)?;
-    let val = f(stream)?;
+    let now_pos = stream.stream_position()?;
+    let val = f(stream).map_err(|e| binrw::Error::Custom {
+        pos: now_pos,
+        err: Box::new(e),
+    })?;
     stream.seek(SeekFrom::Start(old_pos))?;
     Ok(val)
 }
@@ -119,10 +124,9 @@ impl BinReadOptional for MetaString {
         endian: Endian,
         cx: Self::Args<'_>,
     ) -> BinResult<Option<Self>> {
-        StringIdx::read_optional(reader, endian, cx)
-            .transpose()
+        StringIdx::read_optional(reader, endian, cx)?
             .map(|idx| {
-                let offset = u64::from(idx?.to_u32());
+                let offset = u64::from(idx.to_u32());
                 with_seek(
                     SeekFrom::Start(cx.heaps.string.offset + offset),
                     reader,
@@ -132,6 +136,8 @@ impl BinReadOptional for MetaString {
                     },
                 )
             })
+            .transpose()?
+            .map(Ok)
             .transpose()
     }
 }
@@ -467,7 +473,7 @@ impl BinRead for Streams {
 
         let heaps = Heaps {
             string: header("#Strings")?,
-            user_string: header("#US")?,
+            user_string: header("#US").unwrap_or_else(|_| Heap { offset: 0, size: 0 }),
             blob: header("#Blob")?,
             guid: header("#GUID")?,
         };
@@ -588,19 +594,29 @@ macro_rules! def_tables {
 
                 let mut tables = Tables::new(Module::read_options(reader, endian, (&cx,))?);
 
-                // sort of janky iterator because we need the correct order (todo: consider IndexMap?).
                 for (table_id, &row_count) in present_tables
                     .iter()
                     .flat_map(TokenTableFlags::to_discrete)
                     .flat_map(|table| row_count_map.get(&table).map(|count| (table, count)))
                 {
                     println!("{table_id:?}: {row_count}");
+                }
+
+                println!("meta cx: {cx:#?}");
+
+                // sort of janky iterator because we need the correct order (todo: consider IndexMap?).
+                for (table_id, &row_count) in present_tables
+                    .iter()
+                    .flat_map(TokenTableFlags::to_discrete)
+                    .flat_map(|table| row_count_map.get(&table).map(|count| (table, count)))
+                {
                     match table_id {
                         TableId::Module => continue,
                         $(
                             TableId::$table => {
                                 // todo: handle sorting
-                                for _ in 0..row_count {
+                                for i in 0..row_count {
+                                    // println!("parsing {table_id:?} #{i}...");
                                     let row = <$table>::read_options(reader, endian, (&cx,))?;
                                     tables.$field.push_row(row);
                                 }
@@ -778,6 +794,13 @@ impl<T> Table<T> {
         let idx = self.len();
         self.rows.push(Some(value));
         TableIdx(idx)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (TableIdx, &T)> {
+        self.rows
+            .iter()
+            .enumerate()
+            .filter_map(|(i, x)| x.as_ref().map(|x| (TableIdx(i), x)))
     }
 }
 

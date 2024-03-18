@@ -13,13 +13,7 @@ pub struct Bytes(pub Vec<u8>);
 
 impl fmt::Debug for Bytes {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "0x")?;
-        for byte in &self.0 {
-            let hi = usize::from(byte >> 4);
-            let lo = usize::from(byte & 0xf);
-            write!(f, "{hi:x}{lo:x}")?;
-        }
-        Ok(())
+        write!(f, "[... {:?} bytes ...]", self.0.len())
     }
 }
 
@@ -212,8 +206,14 @@ pub struct NtFields {
     pub subsystem: Subsystem,
 }
 
-#[derive(BinRead, BinWrite, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(BinRead, BinWrite, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Rva(pub u32);
+
+impl fmt::Debug for Rva {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "r:{:#010x}", self.0)
+    }
+}
 
 impl ops::Add for Rva {
     type Output = Rva;
@@ -488,22 +488,31 @@ pub struct Pe {
 }
 
 impl Rva {
-    pub fn resolve_in_section(self, section: &Section) -> Option<u32> {
-        if section.virtual_address < self && self < section.virtual_address + section.virtual_size {
-            Some((self - section.virtual_address).0)
-        } else {
-            None
-        }
+    pub fn is_contained_in(self, section: &Section) -> bool {
+        section.virtual_address < self && self < section.virtual_address + section.virtual_size
     }
 
-    pub(crate) fn slice_section(self, section: &Section) -> Option<&[u8]> {
-        self.resolve_in_section(section)
+    pub fn slice_section(self, section: &Section) -> Option<&[u8]> {
+        self.is_contained_in(section)
+            .then(|| (self - section.virtual_address).0)
             .map(|x| &section.body[x as usize..])
     }
 
-    pub(crate) fn slice_sections(self, sections: &[Section]) -> Option<&[u8]> {
+    pub fn find_containing<'a>(
+        self,
+        sections: impl IntoIterator<Item = &'a Section>,
+    ) -> Option<&'a Section> {
         sections
-            .iter()
+            .into_iter()
+            .find(|section| self.is_contained_in(section))
+    }
+
+    pub fn slice_sections<'a>(
+        self,
+        sections: impl IntoIterator<Item = &'a Section>,
+    ) -> Option<&'a [u8]> {
+        sections
+            .into_iter()
             .find_map(|section| self.slice_section(section))
     }
 }
@@ -531,11 +540,11 @@ impl Region {
 
     pub fn parse_options<T: BinRead>(
         self,
-        sections: &[Section],
+        section: &Section,
         endian: Endian,
         args: T::Args<'_>,
     ) -> BinResult<Option<T>> {
-        self.slice_sections(sections)
+        self.slice_section(section)
             .map(|bytes| {
                 let mut cursor = Cursor::new(bytes);
                 T::read_options(&mut cursor, endian, args)
@@ -543,10 +552,10 @@ impl Region {
             .transpose()
     }
 
-    pub fn parse_le<T: for<'a> BinRead<Args<'a> = ()>>(
-        self,
-        sections: &[Section],
-    ) -> BinResult<Option<T>> {
-        self.parse_options(sections, Endian::Little, ())
+    pub fn parse_le<T: BinRead>(self, section: &Section) -> BinResult<Option<T>>
+    where
+        for<'a> T::Args<'a>: Default,
+    {
+        self.parse_options(section, Endian::Little, <T::Args<'_>>::default())
     }
 }

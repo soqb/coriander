@@ -501,44 +501,25 @@ pub enum InstructionPrefix {
     Volatile,
 }
 
-bitflags! {
-    #[derive(Debug, Clone, Copy, Default)]
-    pub struct PrefixFlags: u8 {
-        const READONLY = 0x1;
-        const TAIL = 0x2;
-        const VOLATILE = 0x4;
-    }
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct AggregatePrefix {
-    pub flags: PrefixFlags,
+    pub readonly: bool,
+    pub tail: bool,
+    pub voltaile: bool,
     pub type_constraint: Option<Token<token::Type>>,
     pub alignment: Option<u8>,
     pub skipped_checks: SkippedChecks,
-    // fixme: this method of syncing `InstructionRef`s is very clunky
-    pub len: u8,
-}
-
-impl AggregatePrefix {
-    /// The minimum number of prefixes which can result in the exact configuration of `self`.
-    pub fn min_len(&self) -> u8 {
-        !self.flags.is_empty() as u8
-            + self.type_constraint.is_some() as u8
-            + self.alignment.is_some() as u8
-            + !self.skipped_checks.is_empty() as u8
-    }
 }
 
 #[derive(Debug, Clone)]
 pub struct InstructionPoint {
-    pub prefix: AggregatePrefix,
+    pub prefix: Option<Box<AggregatePrefix>>,
     pub instruction: Instruction,
 }
 
 impl InstructionPoint {
-    pub fn len(&self) -> u8 {
-        1 + self.prefix.len
+    pub fn byte_len(&self) -> usize {
+        todo!()
     }
 }
 
@@ -562,7 +543,7 @@ impl InstructionTable {
         let key = {
             // we offset by `InstructionPoint::len` so that `InstructionRef::thin_new` is kept
             // in sync over prefixes.
-            let future = InstructionRef(self.next_ref.0 + i.len() as usize);
+            let future = InstructionRef(self.next_ref.0 + 1);
             replace(&mut self.next_ref, future)
         };
         self.locations.shift_insert(idx, key, i);
@@ -573,6 +554,15 @@ impl InstructionTable {
         self.locations.get_index_of(&p)
     }
 
+    /// Skip `count` reference indices.
+    ///
+    /// This is a convinient way to raise future-compatible references.
+    ///
+    /// `InstructionRef` synchronisation is preserved since the index is still strictly increasing
+    pub fn skip_refs(&mut self, count: usize) {
+        self.next_ref = InstructionRef(self.next_ref.0 + count);
+    }
+
     pub fn offset_from_to(&self, a: InstructionRef, b: InstructionRef) -> Option<i32> {
         let Some(a) = self.index_of(a) else {
             return None;
@@ -581,7 +571,10 @@ impl InstructionTable {
             return None;
         };
         let range = if b >= a { a..b } else { b..a };
-        let sum: u8 = self.locations[range].iter().map(|(_, i)| i.len()).sum();
+        let sum: usize = self.locations[range]
+            .iter()
+            .map(|(_, i)| i.byte_len())
+            .sum();
         Some(if b >= a { sum as i32 } else { -(sum as i32) })
     }
 
@@ -625,5 +618,63 @@ impl InstructionTable {
 
     pub fn get_mut(&mut self, p: InstructionRef) -> Option<&mut InstructionPoint> {
         self.locations.get_mut(&p)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MethodInfo {
+    pub max_stack: u16,
+    pub local_var_sig: Option<Token<StandAloneSig>>,
+}
+
+impl Default for MethodInfo {
+    fn default() -> Self {
+        MethodInfo {
+            max_stack: 8,
+            local_var_sig: None,
+        }
+    }
+}
+
+#[derive(Default, Debug, Clone)]
+pub struct MethodBody {
+    pub header: MethodInfo,
+    pub instructions: InstructionTable,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, io};
+
+    use binrw::BinRead as _;
+    use coriander_parser::{pe::Pe, ClrExe};
+
+    use crate::MethodBody;
+
+    #[test]
+    fn test() -> anyhow::Result<()> {
+        let file = fs::read("/home/seth/projects/cshp/disco/il2cppbridge/lib/um/mscorlib.dll")?;
+        let mut cursor = io::Cursor::new(file);
+        let clr = ClrExe::new(Pe::read_le(&mut cursor)?)?;
+
+        for (_, method) in clr.metadata.metadata.tables.method_def.iter() {
+            if method.rva.0 == 0 {
+                continue;
+            }
+            let section = method.rva.find_containing(&clr.pe.sections).unwrap();
+            println!(
+                "{}: @ {}",
+                method.name,
+                (method.rva - section.virtual_address).0 + section.body_offset.unwrap()
+            );
+            let body_slice = method.rva.slice_section(&section).unwrap();
+
+            let mut body_cursor = io::Cursor::new(body_slice);
+
+            let body = MethodBody::read_le(&mut body_cursor)?;
+            // eprintln!("{name} ::: {body:#?}", name = method.name);
+        }
+
+        panic!("we're called elizabethans; you're all a bunch of heathens.")
     }
 }

@@ -3,65 +3,66 @@ use std::{
     mem::take,
 };
 
-use binrw::{BinRead, BinResult};
-use coriander_parser::metadata::{Token, TokenType, UserStringIdx};
-use indexmap::IndexMap;
+use binrw::{BinRead, BinResult, Endian};
+use coriander_parser::{
+    metadata::{StandAloneSig, Token, TokenType, UserStringIdx},
+    utils::BinReadOptional,
+};
 
 use crate::{
     AggregatePrefix,
     ArithmeticKind::{NonOverflowing, SignedOverflow, UnsignedOverflow},
     Constant, ConversionType, ElementLoadType, ElementStoreType, Instruction as I,
     InstructionLoadType, InstructionPoint, InstructionPrefix, InstructionRef, InstructionStoreType,
-    InstructionTable, IntegerType as Int, PrefixFlags,
+    InstructionTable, IntegerType as Int, MethodBody, MethodInfo,
     Signage::{Signed, Unsigned},
     SkippedChecks,
 };
 
-fn read_i32_ir<R: Read + Seek>(reader: &mut R, offset: usize) -> BinResult<InstructionRef> {
-    let x = i32::read_le(reader)? as isize;
+fn read_i32_ir<R: Read + Seek>(reader: &mut R, start_pos: u64) -> BinResult<InstructionRef> {
+    let base = reader.stream_position()? - start_pos;
+    let x = i32::read_le(reader)? as i64;
     let idx = if x.is_negative() {
-        offset - x.wrapping_abs() as u32 as usize
+        base - x.wrapping_abs() as u32 as u64
     } else {
-        offset + x as usize
+        base + x as u64
     };
-    Ok(InstructionRef::new_thin(idx))
+    Ok(InstructionRef::new_thin(idx as usize))
 }
 
-fn read_i8_ir<R: Read + Seek>(reader: &mut R, offset: usize) -> BinResult<InstructionRef> {
-    let x = i8::read_le(reader)? as isize;
+fn read_i8_ir<R: Read + Seek>(reader: &mut R, start_pos: u64) -> BinResult<InstructionRef> {
+    let base = reader.stream_position()? - start_pos;
+    let x = i8::read_le(reader)? as i64;
     let idx = if x.is_negative() {
-        offset - x.wrapping_abs() as u8 as usize
+        base - x.wrapping_abs() as u8 as u64
     } else {
-        offset + x as usize
+        base + x as u64
     };
-    Ok(InstructionRef::new_thin(idx))
+    Ok(InstructionRef::new_thin(idx as usize))
 }
 
 fn read_token<R: Read + Seek, T: TokenType + ?Sized + 'static>(
     reader: &mut R,
 ) -> BinResult<Token<T>> {
-    let token = Token::<()>::read_le(reader)?;
+    let token = Token::<()>::read_be(reader)?;
     token.retype().ok_or(()).or_else(|_| {
         Err(binrw::Error::Custom {
             pos: reader.stream_position()? - 4,
             err: Box::new(format!(
-                "the table {:?} was not valid for a token of type {}",
-                token.table_id(),
+                "the token {token:?} was not valid for a token of type {}",
                 std::any::type_name::<T>()
             )),
         })
     })
 }
 
+#[derive(Debug)]
 enum StreamElement {
     Instruction(I),
     Prefix(InstructionPrefix),
 }
 
-fn stream_instruction<R: Read + Seek>(
-    reader: &mut R,
-    current_idx: usize,
-) -> BinResult<StreamElement> {
+fn stream_instruction<R: Read + Seek>(reader: &mut R, start_pos: u64) -> BinResult<StreamElement> {
     let a = u8::read_le(reader)?;
     let i = match a {
         // 1-byte base instructions:
@@ -69,81 +70,81 @@ fn stream_instruction<R: Read + Seek>(
         0xd6 => I::Add(SignedOverflow),
         0xd7 => I::Add(UnsignedOverflow),
         0x5f => I::And,
-        0x3b => I::Beq(read_i32_ir(reader, current_idx)?),
-        0x2e => I::Beq(read_i8_ir(reader, current_idx)?),
+        0x3b => I::Beq(read_i32_ir(reader, start_pos)?),
+        0x2e => I::Beq(read_i8_ir(reader, start_pos)?),
         0x3c => I::Bge {
             sign: Signed,
-            target: read_i32_ir(reader, current_idx)?,
+            target: read_i32_ir(reader, start_pos)?,
         },
         0x2f => I::Bge {
             sign: Signed,
-            target: read_i8_ir(reader, current_idx)?,
+            target: read_i8_ir(reader, start_pos)?,
         },
         0x41 => I::Bge {
             sign: Unsigned,
-            target: read_i32_ir(reader, current_idx)?,
+            target: read_i32_ir(reader, start_pos)?,
         },
         0x34 => I::Bge {
             sign: Unsigned,
-            target: read_i8_ir(reader, current_idx)?,
+            target: read_i8_ir(reader, start_pos)?,
         },
         0x3d => I::Bgt {
             sign: Signed,
-            target: read_i32_ir(reader, current_idx)?,
+            target: read_i32_ir(reader, start_pos)?,
         },
         0x30 => I::Bgt {
             sign: Signed,
-            target: read_i8_ir(reader, current_idx)?,
+            target: read_i8_ir(reader, start_pos)?,
         },
         0x42 => I::Bgt {
             sign: Unsigned,
-            target: read_i32_ir(reader, current_idx)?,
+            target: read_i32_ir(reader, start_pos)?,
         },
         0x35 => I::Bgt {
             sign: Unsigned,
-            target: read_i8_ir(reader, current_idx)?,
+            target: read_i8_ir(reader, start_pos)?,
         },
         0x3e => I::Ble {
             sign: Signed,
-            target: read_i32_ir(reader, current_idx)?,
+            target: read_i32_ir(reader, start_pos)?,
         },
         0x31 => I::Ble {
             sign: Signed,
-            target: read_i8_ir(reader, current_idx)?,
+            target: read_i8_ir(reader, start_pos)?,
         },
         0x43 => I::Ble {
             sign: Unsigned,
-            target: read_i32_ir(reader, current_idx)?,
+            target: read_i32_ir(reader, start_pos)?,
         },
         0x36 => I::Ble {
             sign: Unsigned,
-            target: read_i8_ir(reader, current_idx)?,
+            target: read_i8_ir(reader, start_pos)?,
         },
         0x3f => I::Blt {
             sign: Signed,
-            target: read_i32_ir(reader, current_idx)?,
+            target: read_i32_ir(reader, start_pos)?,
         },
         0x32 => I::Blt {
             sign: Signed,
-            target: read_i8_ir(reader, current_idx)?,
+            target: read_i8_ir(reader, start_pos)?,
         },
         0x44 => I::Blt {
             sign: Unsigned,
-            target: read_i32_ir(reader, current_idx)?,
+            target: read_i32_ir(reader, start_pos)?,
         },
         0x37 => I::Blt {
             sign: Unsigned,
-            target: read_i8_ir(reader, current_idx)?,
+            target: read_i8_ir(reader, start_pos)?,
         },
-        0x40 => I::BneUnsigned(read_i32_ir(reader, current_idx)?),
-        0x33 => I::BneUnsigned(read_i8_ir(reader, current_idx)?),
-        0x38 => I::Br(read_i32_ir(reader, current_idx)?),
-        0x2b => I::Br(read_i8_ir(reader, current_idx)?),
+        0x40 => I::BneUnsigned(read_i32_ir(reader, start_pos)?),
+        0x33 => I::BneUnsigned(read_i8_ir(reader, start_pos)?),
+        0x38 => I::Br(read_i32_ir(reader, start_pos)?),
+        0x2b => I::Br(read_i8_ir(reader, start_pos)?),
         0x01 => I::Break,
-        0x39 => I::BrFalse(read_i32_ir(reader, current_idx)?),
-        0x2c => I::BrFalse(read_i8_ir(reader, current_idx)?),
-        0x3a => I::BrTrue(read_i32_ir(reader, current_idx)?),
-        0x2d => I::BrTrue(read_i8_ir(reader, current_idx)?),
+        0x39 => I::BrFalse(read_i32_ir(reader, start_pos)?),
+        0x2c => I::BrFalse(read_i8_ir(reader, start_pos)?),
+        0x3a => I::BrTrue(read_i32_ir(reader, start_pos)?),
+        0x2d => I::BrTrue(read_i8_ir(reader, start_pos)?),
         0x28 => I::Call(read_token(reader)?),
         0x29 => I::CallIndirect(read_token(reader)?),
         0xc3 => I::Ckfinite,
@@ -225,8 +226,8 @@ fn stream_instruction<R: Read + Seek>(
         0x09 => I::LdLoc(3),
         0x12 => I::LdLocAddr(u8::read_le(reader)?.into()),
         0x14 => I::LdNull,
-        0xdd => I::Leave(read_i32_ir(reader, current_idx)?),
-        0xde => I::Leave(read_i8_ir(reader, current_idx)?),
+        0xdd => I::Leave(read_i32_ir(reader, start_pos)?),
+        0xde => I::Leave(read_i8_ir(reader, start_pos)?),
         0x5a => I::Mul(NonOverflowing),
         0xd8 => I::Mul(SignedOverflow),
         0xd9 => I::Mul(UnsignedOverflow),
@@ -262,7 +263,7 @@ fn stream_instruction<R: Read + Seek>(
             let len = u32::read_le(reader)? as usize;
             let mut branches = Vec::new();
             for _ in 0..len {
-                branches.push(read_i32_ir(reader, current_idx)?);
+                branches.push(read_i32_ir(reader, start_pos)?);
             }
             I::Switch(branches)
         }
@@ -313,6 +314,7 @@ fn stream_instruction<R: Read + Seek>(
         0x80 => I::StSfld(read_token(reader)?),
         0x7a => I::Throw,
         0x79 => I::Unbox(read_token(reader)?),
+        0xa5 => I::UnboxAny(read_token(reader)?),
 
         // 2-byte instructions:
         0xfe => {
@@ -379,19 +381,20 @@ fn stream_instruction<R: Read + Seek>(
 }
 
 impl BinRead for InstructionTable {
-    type Args<'a> = ();
+    type Args<'a> = u32;
 
     fn read_options<R: Read + Seek>(
         reader: &mut R,
-        _: binrw::Endian,
-        _: Self::Args<'_>,
+        _: Endian,
+        total_size: Self::Args<'_>,
     ) -> BinResult<Self> {
+        let start_pos = reader.stream_position()?;
+        let end_pos = start_pos + total_size as u64;
+
         let mut table = InstructionTable::default();
-        let mut prefix = AggregatePrefix::default();
-        let mut current_idx = 0;
-        loop {
-            let element = stream_instruction(reader, current_idx)?;
-            current_idx += 1;
+        let mut prefix = None;
+        while end_pos > reader.stream_position()? {
+            let element = stream_instruction(reader, start_pos)?;
             match element {
                 StreamElement::Instruction(instruction) => {
                     table.push(InstructionPoint {
@@ -401,19 +404,77 @@ impl BinRead for InstructionTable {
                 }
                 // todo: verify prefixes are only used on the correct instructions.
                 StreamElement::Prefix(p) => {
-                    prefix.len += 1;
+                    let prefix = prefix.get_or_insert_with(|| Box::new(AggregatePrefix::default()));
                     match p {
                         InstructionPrefix::Constrained(t) => {
                             prefix.type_constraint = Some(t);
                         }
-                        InstructionPrefix::No(skip) => prefix.skipped_checks |= skip,
-                        InstructionPrefix::Readonly => prefix.flags |= PrefixFlags::READONLY,
-                        InstructionPrefix::Tail => prefix.flags |= PrefixFlags::TAIL,
-                        InstructionPrefix::Volatile => prefix.flags |= PrefixFlags::VOLATILE,
                         InstructionPrefix::Unaligned(u) => prefix.alignment = Some(u),
+                        InstructionPrefix::No(skip) => prefix.skipped_checks |= skip,
+                        InstructionPrefix::Readonly => prefix.readonly = true,
+                        InstructionPrefix::Tail => prefix.tail = true,
+                        InstructionPrefix::Volatile => prefix.voltaile = true,
                     }
                 }
             }
         }
+
+        // fixme: error if we end with prefixes but no final instruction
+        Ok(table)
+    }
+}
+
+impl BinRead for MethodBody {
+    type Args<'a> = ();
+
+    fn read_options<R: Read + Seek>(
+        reader: &mut R,
+        _: Endian,
+        _: Self::Args<'_>,
+    ) -> BinResult<Self> {
+        let a = u8::read(reader)?;
+        let (size, header) = match a & 0b11 {
+            // tiny header format:
+            0x2 => ((a >> 2) as u32, MethodInfo::default()),
+            // fat header format:
+            0x3 => {
+                let b = u8::read(reader)?;
+                let _flags = u16::from_le_bytes([a, b & 0b1111]);
+                let max_stack = u16::read_le(reader)?;
+                let size = u32::read_le(reader)?;
+                let local_var_sig = Token::<()>::read_optional(reader, Endian::Big, ())?
+                    .map(|token| {
+                        Token::retype(token).ok_or(()).or_else(|_| {
+                            Err(binrw::Error::Custom {
+                                pos: reader.stream_position()? - 4,
+                                err: Box::new(format!(
+                                    "the table {:?} was not valid for a token of type {}",
+                                    token.table_id(),
+                                    std::any::type_name::<StandAloneSig>()
+                                )),
+                            })
+                        })
+                    })
+                    .transpose()?;
+                (
+                    size,
+                    MethodInfo {
+                        max_stack,
+                        local_var_sig,
+                    },
+                )
+            }
+            _ => {
+                return Err(binrw::Error::NoVariantMatch {
+                    pos: reader.stream_position()? - 1,
+                })
+            }
+        };
+        let instructions = InstructionTable::read_le_args(reader, size)?;
+
+        Ok(MethodBody {
+            header,
+            instructions,
+        })
     }
 }

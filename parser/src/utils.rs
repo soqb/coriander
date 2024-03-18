@@ -230,10 +230,11 @@ macro_rules! impl_brw_optional {
                 endian: binrw::Endian,
                 args: Self::Args<'_>,
             ) -> binrw::BinResult<Self> {
+                let pos = reader.stream_position()?;
                 Self::read_optional(reader, endian, args)?
                     .ok_or(())
-                    .or_else(|_| Err(binrw::Error::Custom {
-                        pos: reader.stream_position()?,
+                    .or_else(move |_| Err(binrw::Error::Custom {
+                        pos,
                         err: Box::new("unexpected null found"),
                     }))
             }

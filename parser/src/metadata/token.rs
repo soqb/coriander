@@ -1,7 +1,7 @@
 use core::fmt;
 use std::{
     collections::HashMap,
-    io::{Read, Seek, Write},
+    io::{Read, Seek, SeekFrom, Write},
     num::NonZeroU32,
 };
 
@@ -200,7 +200,7 @@ mod stream_idxs {
             $vis:vis $name:ident($stream_flag:expr);
         ) => {
             $(#[$attr])*
-            $vis struct $name(NonZeroU32);
+            $vis struct $name(pub NonZeroU32);
 
             impl $name {
                 pub fn to_u32(self) -> u32 {
@@ -329,21 +329,49 @@ macro_rules! def_token_categories {
                     endian: Endian,
                     cx: Self::Args<'_>,
                 ) -> BinResult<Option<Self>> {
-                    if cx.sizes().cat_is_big($cat_flag) {
-                        Ok(Token::<()>::read_optional(reader, endian, ())?.and_then(Token::retype))
+                    let (rid, tag) = if cx.sizes().cat_is_big($cat_flag) {
+
+                        // Token::<()>::read_optional(reader, endian, ())?.map(|tok| {
+                        //         tok.retype().ok_or(()).or_else(|_| Err(binrw::Error::Custom {
+                        //             pos: reader.stream_position()?,
+                        //             err: Box::new(
+                        //                 format!(
+                        //                     "invalid table {table:?} for token with category {category}",
+                        //                     table = tok.table_id(),
+                        //                     category = stringify!($name),
+                        //                 ),
+                        //             ),
+                        //         }))
+                        //     }).transpose()
+                        let bits = u32::read_options(reader, endian, ())?;
+                        let rid = bits >> $tag_bits;
+                        let tag = bits & ((1 << $tag_bits) - 1);
+                        (rid, tag)
                     } else {
                         let bits = u16::read_options(reader, endian, ())?;
                         let rid = bits >> $tag_bits;
                         let tag = bits & ((1 << $tag_bits) - 1);
-                        let table = match tag {
-                            $(
-                                $pat => $name::$table,
-                            )*
-                            _ => return Err(binrw::Error::NoVariantMatch { pos: reader.stream_position()? - 2 }),
-                        };
+                        (rid as u32, tag as u32)
+                    };
 
-                        Ok(Rid::new(rid as u32).map(TableIdx::new_thin).map(|idx| Token { table, idx }))
+                    if rid == 0 {
+                        return Ok(None);
                     }
+                    let table = match tag {
+                        $(
+                            $pat => $name::$table,
+                        )*
+                        _ => {
+                            let offset = if cx.sizes().cat_is_big($cat_flag) {
+                                4
+                            } else {
+                                2
+                            };
+                            return Err(binrw::Error::NoVariantMatch { pos: reader.stream_position()? - offset })
+                        },
+                    };
+
+                    Ok(Rid::new(rid as u32).map(TableIdx::new_thin).map(|idx| Token { table, idx }))
                 }
             }
 
@@ -355,17 +383,18 @@ macro_rules! def_token_categories {
                     endian: Endian,
                     cx: Self::Args<'_>,
                 ) -> BinResult<()> {
-                    if cx.sizes().cat_is_big($cat_flag) {
-                        self.to_abstract().write_options(writer, endian, cx.order())
-                    } else {
-                        let tag = match self.table {
-                            $(
-                                $name::$table => $pat,
-                            )*
-                        };
-                        let rid = cx.order().token_rid(*self)?.to_u32() as u16;
-                        let bits = (rid << $tag_bits) | tag;
+                    let tag: u32 = match self.table {
+                        $(
+                            $name::$table => $pat,
+                        )*
+                    };
+                    let rid = cx.order().token_rid(*self)?.to_u32();
 
+                    if cx.sizes().cat_is_big($cat_flag) {
+                        let bits = (rid << $tag_bits) | tag;
+                        bits.write_options(writer, endian, ())
+                    } else {
+                        let bits: u16 = ((rid as u16) << $tag_bits) | tag as u16;
                         bits.write_options(writer, endian, ())
                     }
                 }
@@ -387,8 +416,8 @@ macro_rules! def_token_categories {
             $(
                 {
                     const MAX_SMALL_IDX: u32 = 1 << (16 - $tag_bits);
-                    if true $(
-                        && mapping(TableId::$table) >= MAX_SMALL_IDX
+                    if false $(
+                        || mapping(TableId::$table) >= MAX_SMALL_IDX
                     )* {
                         flags |= $cat_flag;
                     }
@@ -521,21 +550,27 @@ impl BinReadOptional for Token<()> {
         _: Self::Args<'_>,
     ) -> BinResult<Option<Self>> {
         // todo: It's ambiguous in the spec as to what exactly a "null" token is.
-        // Specifically, whether the bit patterns of the form `0xNN000000` are all valid nulls.
-        // We assume they are, but don't preserve their exact form.
-        let table = TableId::read_options(reader, endian, ())?;
+        // Specifically, whether the bit patterns of the form `0xNM000000` are all valid nulls.
+        // We assume they are, but don't preserve their exact form (i.e. all nulls are written as zeros).
+        let (table, id) = if endian == Endian::Little {
+            let table = TableId::read_options(reader, endian, ())?;
 
-        let mut triplet = [0; 3];
-        reader.read_exact(&mut triplet)?;
-        let id = if endian == Endian::Little {
-            u32::from_le_bytes([triplet[0], triplet[1], triplet[2], 0])
+            let mut triplet = [0; 3];
+            reader.read_exact(&mut triplet)?;
+            let id = u32::from_le_bytes([triplet[0], triplet[1], triplet[2], 0]);
+            (table, id)
         } else {
-            u32::from_be_bytes([0, triplet[0], triplet[1], triplet[2]])
+            let mut triplet = [0; 3];
+            reader.read_exact(&mut triplet)?;
+            let id = u32::from_le_bytes([triplet[0], triplet[1], triplet[2], 0]);
+
+            let table = TableId::read_options(reader, endian, ())?;
+            (table, id)
         };
 
         Ok(Rid::new(id)
             .map(TableIdx::new_thin)
-            .map(|rid| Token { table, idx: rid }))
+            .map(|idx| Token { table, idx }))
     }
 }
 
@@ -551,12 +586,12 @@ impl BinWriteOptional for Token<()> {
         let id = cx.token_rid(*self)?.to_u32();
         assert!(id < 2u32.pow(24));
 
-        self.table.write_options(writer, endian, ())?;
-
         if endian == Endian::Little {
+            self.table.write_options(writer, endian, ())?;
             writer.write_all(&id.to_le_bytes()[0..3])?;
         } else {
             writer.write_all(&id.to_be_bytes()[1..])?;
+            self.table.write_options(writer, endian, ())?;
         }
 
         Ok(())

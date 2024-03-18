@@ -446,15 +446,19 @@ def_table_entries! {
         pub element_type: ValueElementType,
         #[brw(args_raw = _cx)]
         pub parent: Token<HasConstant>,
-        #[brw(args_raw = _cx)]
-        pub value: BlobIdx,
+        // the spec does /not/ make it clear that this can be optional!
+        #[br(parse_with = parse_args!(BlobIdx::read_optional; _cx))]
+        #[bw(write_with = write_args!(BlobIdx::write_optional; _cx))]
+        pub value: Option<BlobIdx>,
     }
 
     pub CustomAttribute(TokenTableFlags::CUSTOM_ATTRIBUTE) {
         #[brw(args_raw = _cx)]
         pub parent: Token<HasCustomAttribute>,
-        #[brw(args_raw = _cx)]
-        pub type_: Token<CustomAttributeType>,
+        // spec says non-optional. some libraries disagree!
+        #[br(parse_with = parse_args!(Token::read_optional; _cx))]
+        #[bw(write_with = write_args!(Token::write_optional; _cx))]
+        pub type_: Option<Token<CustomAttributeType>>,
         #[br(parse_with = parse_args!(BlobIdx::read_optional; _cx))]
         #[bw(write_with = write_args!(BlobIdx::write_optional; _cx))]
         pub value: Option<BlobIdx>,
@@ -659,9 +663,9 @@ def_table_entries! {
     pub Param(TokenTableFlags::PARAM) {
         pub flags: ParamAttributes,
         pub sequence: u16,
-        #[br(parse_with = parse_args!(MetaString::read_unwrap; _cx))]
-        #[bw(write_with = write_args!(MetaString::write_wrap; _cx))]
-        pub name: String,
+        #[br(parse_with = parse_args!(MetaString::read_opt; _cx))]
+        #[bw(write_with = write_args!(MetaString::write_opt; _cx))]
+        pub name: Option<String>,
     }
 
     pub Property(TokenTableFlags::PROPERTY) {
